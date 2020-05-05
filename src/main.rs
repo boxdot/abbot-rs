@@ -271,7 +271,12 @@ mod tasks {
             .iter()
             .map(|id| format!("* {}", id.value()))
             .collect();
-        items.join("\n")
+        let res = items.join("\n");
+        if res.is_empty() {
+            "n/a".to_string()
+        } else {
+            res
+        }
     }
 
     fn enable(db: &mut Db, user: User, project: ProjectId) -> String {
@@ -290,9 +295,16 @@ mod tasks {
         let user_projects = db.users.entry(user.clone()).or_default();
         if let Some(idx) = user_projects.iter().position(|&id| id == project) {
             user_projects.swap_remove(idx);
+            if user_projects.is_empty() {
+                db.users.remove(&user);
+            }
+
             let project_users = db.projects.entry(project).or_default();
             if let Some(idx) = project_users.iter().position(|u| u == &user) {
                 project_users.swap_remove(idx);
+                if project_users.is_empty() {
+                    db.projects.remove(&project);
+                }
             } else {
                 log::warn!(
                     "invalid db: user {:?} not found in project {}",
