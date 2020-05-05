@@ -71,9 +71,12 @@ mod handlers {
 
     pub async fn gitlab(
         msg: gitlab::webhooks::WebHook,
-        _state: State,
+        state: State,
     ) -> Result<impl warp::Reply, Infallible> {
         log::debug!("incoming gitlab web hook: {:?}", msg);
+
+        tokio::spawn(tasks::notify(state, msg));
+
         Ok(StatusCode::OK)
     }
 
@@ -141,6 +144,12 @@ mod models {
     #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
     pub struct User(pub Email);
 
+    impl From<User> for String {
+        fn from(user: User) -> Self {
+            (user.0).0
+        }
+    }
+
     #[derive(Debug, Default)]
     pub struct Db {
         pub projects: BTreeMap<ProjectId, Vec<User>>,
@@ -186,7 +195,6 @@ mod tasks {
     pub async fn answer(state: State, user: User, msg: webex::types::Message) {
         let text = msg.text.as_ref().map(|s| s.as_str());
         let cmd = Command::from_text(text.unwrap_or_default());
-        log::debug!("command: {:?}", cmd);
 
         let reply = match cmd {
             Command::Welcome => welcome(&state.lock().await.public_url).to_string(),
@@ -330,6 +338,41 @@ mod tasks {
                 .map(|dt| dt.to_string())
                 .unwrap_or_else(|| "n/a".to_string())
         )
+    }
+
+    pub async fn notify(state: State, msg: gitlab::webhooks::WebHook) {
+        use gitlab::webhooks::WebHook::*;
+        let project_id = match &msg {
+            Push(hook) => hook.project_id,
+            // Issue(hook) => hook.project.project_id,
+            // MergeRequest(hook) => hook.project_id,
+            Note(hook) => hook.project_id,
+            Build(hook) => hook.project_id,
+            // WikiPage(hook) => hook.project_id,
+            _ => todo!("handle all hooks"),
+        };
+
+        let state = state.lock().await;
+
+        let client = webex::Webex::new(&state.webex_token);
+
+        if let Some(project_users) = state.db.projects.get(&project_id) {
+            for user in project_users {
+                let msg_out = webex::types::MessageOut {
+                    to_person_email: Some(user.clone().into()),
+                    markdown: Some(format!("{:?}", msg)),
+                    ..Default::default()
+                };
+
+                let user = user.clone();
+                let client = client.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = client.send_message(&msg_out).await {
+                        log::error!("failed to notify user {:?} due to: {}", user, e);
+                    }
+                });
+            }
+        }
     }
 
     #[cfg(test)]
