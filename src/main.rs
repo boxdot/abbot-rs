@@ -19,7 +19,7 @@ async fn main() -> Result<(), DynError> {
     let routes = api.with(warp::log("abbot"));
 
     let addr: SocketAddr = ([0, 0, 0, 0], 3030).into();
-    log::info!("Listening at: {}", addr);
+    log::info!("listening at: {}", addr);
 
     warp::serve(routes).run(addr).await;
     Ok(())
@@ -125,8 +125,11 @@ mod handlers {
 mod models {
     use crate::DynError;
     use chrono::{DateTime, Utc};
+    use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
     use std::fmt;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use url::Url;
@@ -140,7 +143,7 @@ mod models {
         pub last_notification_at: Option<DateTime<Utc>>,
     }
 
-    #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
     pub struct Email(pub String);
 
     impl From<String> for Email {
@@ -149,7 +152,7 @@ mod models {
         }
     }
 
-    #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
     pub struct User(pub Email);
 
     impl From<User> for String {
@@ -158,7 +161,7 @@ mod models {
         }
     }
 
-    #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
     pub struct ProjectId(pub u64);
 
     impl From<gitlab::ProjectId> for ProjectId {
@@ -173,17 +176,64 @@ mod models {
         }
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Serialize, Deserialize)]
     pub struct Db {
+        #[serde(skip)]
+        path: PathBuf,
         pub projects: BTreeMap<ProjectId, Vec<User>>,
         pub users: BTreeMap<User, Vec<ProjectId>>,
     }
 
+    impl Db {
+        pub fn path_from_env() -> PathBuf {
+            let path = dotenv::var("DB").unwrap_or_else(|_| "abbot-db.json".to_string());
+            path.into()
+        }
+
+        pub fn path(&self) -> &Path {
+            &self.path
+        }
+
+        pub fn load(path: impl AsRef<Path>) -> Result<Self, DynError> {
+            let f = fs::File::open(path)?;
+            let db = serde_json::from_reader(f)?;
+            Ok(db)
+        }
+
+        pub fn save(&self, path: impl AsRef<Path>) -> Result<(), DynError> {
+            let f = fs::File::create(path)?;
+            serde_json::to_writer(f, self)?;
+            Ok(())
+        }
+    }
+
     pub fn state_from_env() -> Result<State, DynError> {
+        let db_path = Db::path_from_env();
+        let db = match Db::load(&db_path) {
+            Ok(db) => {
+                log::info!(
+                    "loaded db with {} user(s), {} project(s) from: {}",
+                    db.users.len(),
+                    db.projects.len(),
+                    db_path.display()
+                );
+                db
+            }
+            Err(e) => {
+                log::warn!("could not load db from {}: {}", db_path.display(), e);
+
+                let db = Db::default();
+                db.save(&db_path)?;
+
+                log::info!("initialized a new empty db at: {}", db_path.display());
+                db
+            }
+        };
+
         Ok(Arc::new(Mutex::new(Data {
             public_url: Url::parse(&dotenv::var("PUBLIC_URL")?)?,
             webex_token: dotenv::var("WEBEX_TOKEN")?,
-            db: Default::default(), // TODO: implement loading db
+            db,
             last_notification_at: None,
         })))
     }
@@ -314,9 +364,13 @@ mod tasks {
         if let Some(_) = user_projects.iter().find(|&&id| id == project) {
             format!("project {} is already enabled", project.0)
         } else {
+            // TODO: debug check for duplicate entries of user
             user_projects.push(project);
             db.projects.entry(project).or_default().push(user);
-            // TODO: debug check for duplicate entries of user
+            if let Err(e) = db.save(db.path()) {
+                log::error!("failed to save db: {}", e);
+                std::process::exit(1);
+            }
             format!("enabled project {}", project.0)
         }
     }
@@ -342,6 +396,12 @@ mod tasks {
                     project
                 );
             }
+
+            if let Err(e) = db.save(db.path()) {
+                log::error!("failed to save db: {}", e);
+                std::process::exit(1);
+            }
+
             format!("project {} disabled", project)
         } else {
             format!("project {} is not enabled", project)
