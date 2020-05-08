@@ -474,16 +474,6 @@ mod tasks {
             _ => return None,
         };
 
-        use gitlab::webhooks::MergeRequestAction;
-        let verb = match merge_request.object_attributes.action? {
-            // we don't hand updates since we don't know what changed
-            MergeRequestAction::Open => return None,
-            MergeRequestAction::Update => "updated",
-            MergeRequestAction::Close => "closed",
-            MergeRequestAction::Reopen => "reopened",
-            MergeRequestAction::Merge => "merged",
-        };
-
         let title = if let Some(url) = &merge_request.object_attributes.url {
             format!(
                 "[{title}]({url})",
@@ -492,6 +482,30 @@ mod tasks {
             )
         } else {
             merge_request.object_attributes.title.clone()
+        };
+
+        let description = if let Some(description) = &merge_request.object_attributes.description {
+            format!("\n\n{}", description)
+        } else {
+            "".to_string()
+        };
+
+        use gitlab::webhooks::MergeRequestAction;
+        let verb = match merge_request.object_attributes.action? {
+            // we don't hand updates since we don't know what changed
+            MergeRequestAction::Open => return None,
+            MergeRequestAction::Update => "updated",
+            MergeRequestAction::Close => "closed",
+            MergeRequestAction::Reopen => {
+                return Some(format!(
+                    "New merge request {title} in [{project}]({project_url}){description}",
+                    title = title,
+                    project = merge_request.project.name,
+                    project_url = merge_request.project.web_url,
+                    description = description
+                ))
+            }
+            MergeRequestAction::Merge => "merged",
         };
 
         Some(format!(
