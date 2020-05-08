@@ -249,7 +249,6 @@ mod models {
         use gitlab::ObjectId;
         use gitlab::PipelineId;
         use gitlab::Runner;
-        use gitlab::StatusState;
         use serde::Deserialize;
 
         #[derive(Debug, Clone, Deserialize)]
@@ -335,6 +334,30 @@ mod models {
             pub tag: bool,
             /// Variables used to during pipeline
             pub variables: Vec<String>,
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        /// States for commit statuses.
+        pub enum StatusState {
+            /// The check was created.
+            Created,
+            /// The check is queued.
+            Pending,
+            /// The check is currently running.
+            Running,
+            /// The check passed.
+            Passed,
+            /// The check succeeded.
+            Success,
+            /// The check failed.
+            Failed,
+            /// The check was canceled.
+            Canceled,
+            /// The check was skipped.
+            Skipped,
+            /// The check is waiting for manual action.
+            Manual,
         }
 
         #[derive(Deserialize, Debug, Clone)]
@@ -743,11 +766,7 @@ mod tasks {
 
         use gitlab::webhooks::MergeRequestAction;
         let verb = match merge_request.object_attributes.action? {
-            // we don't hand updates since we don't know what changed
-            MergeRequestAction::Open => return None,
-            MergeRequestAction::Update => "updated",
-            MergeRequestAction::Close => "closed",
-            MergeRequestAction::Reopen => {
+            MergeRequestAction::Open => {
                 return Some(format!(
                     "New merge request {title} in [{project}]({project_url}){description}",
                     title = title,
@@ -756,6 +775,10 @@ mod tasks {
                     description = description
                 ))
             }
+            // we don't hand updates since we don't know what changed
+            MergeRequestAction::Update => return None,
+            MergeRequestAction::Close => "closed",
+            MergeRequestAction::Reopen => "reopened",
             MergeRequestAction::Merge => "merged",
         };
 
