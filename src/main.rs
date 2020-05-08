@@ -265,11 +265,11 @@ mod tasks {
     use url::Url;
 
     pub async fn answer(state: State, user: User, msg: webex::types::Message) {
-        let text = msg.text.as_ref().map(|s| s.as_str());
+        let text = msg.text.as_deref();
         let cmd = Command::from_text(text.unwrap_or_default());
 
         let reply = match cmd {
-            Command::Welcome => welcome(&state.lock().await.public_url).to_string(),
+            Command::Welcome => welcome(&state.lock().await.public_url),
             Command::Enable(project) => enable(&mut state.lock().await.db, user, project),
             Command::Disable(project) => disable(&mut state.lock().await.db, user, project),
             Command::List => list(&state.lock().await.db, &user),
@@ -361,7 +361,7 @@ mod tasks {
 
     fn enable(db: &mut Db, user: User, project: ProjectId) -> String {
         let user_projects = db.users.entry(user.clone()).or_default();
-        if let Some(_) = user_projects.iter().find(|&&id| id == project) {
+        if user_projects.iter().any(|&id| id == project) {
             format!("project {} is already enabled", project.0)
         } else {
             // TODO: debug check for duplicate entries of user
