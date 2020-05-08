@@ -73,7 +73,10 @@ mod handlers {
         msg: serde_json::Value,
         state: State,
     ) -> Result<impl warp::Reply, Infallible> {
-        log::debug!("incoming gitlab web hook: {:?}", msg);
+        log::debug!(
+            "incoming gitlab web hook: {}",
+            serde_json::to_string(&msg).unwrap_or_else(|_| "invalid JSON".to_string())
+        );
 
         let msg: gitlab::webhooks::WebHook = match serde_json::from_value(msg) {
             Ok(msg) => msg,
@@ -152,6 +155,7 @@ mod models {
         }
     }
 
+    // TODO: use salted shasum hashed email instead of clear text
     #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, Serialize, Deserialize)]
     pub struct User(pub Email);
 
@@ -194,10 +198,10 @@ mod models {
             &self.path
         }
 
-        pub fn load(path: impl AsRef<Path>) -> Result<Self, DynError> {
-            let f = fs::File::open(path)?;
+        pub fn load(path: PathBuf) -> Result<Self, DynError> {
+            let f = fs::File::open(&path)?;
             let db = serde_json::from_reader(f)?;
-            Ok(db)
+            Ok(Self { path, ..db })
         }
 
         pub fn save(&self, path: impl AsRef<Path>) -> Result<(), DynError> {
@@ -209,7 +213,7 @@ mod models {
 
     pub fn state_from_env() -> Result<State, DynError> {
         let db_path = Db::path_from_env();
-        let db = match Db::load(&db_path) {
+        let db = match Db::load(db_path.clone()) {
             Ok(db) => {
                 log::info!(
                     "loaded db with {} user(s), {} project(s) from: {}",
@@ -425,13 +429,16 @@ mod tasks {
     pub async fn notify(state: State, msg: gitlab::webhooks::WebHook) {
         use gitlab::webhooks::WebHook::*;
         let project_id: ProjectId = match &msg {
-            Push(hook) => hook.project_id,
+            // Push(hook) => hook.project_id,
             // Issue(hook) => hook.project.project_id,
-            // MergeRequest(hook) => hook.project_id,
-            Note(hook) => hook.project_id,
-            Build(hook) => hook.project_id,
+            MergeRequest(hook) => hook.object_attributes.target_project_id,
+            // Note(hook) => hook.project_id,
+            // Build(hook) => hook.project_id,
             // WikiPage(hook) => hook.project_id,
-            _ => todo!("handle all hooks"),
+            _ => {
+                log::debug!("dropping unhandled gitlab hook: {:?}", msg);
+                return;
+            }
         }
         .into();
 
@@ -439,23 +446,61 @@ mod tasks {
 
         let client = webex::Webex::new(&state.webex_token);
 
-        if let Some(project_users) = state.db.projects.get(&project_id) {
-            for user in project_users {
-                let msg_out = webex::types::MessageOut {
-                    to_person_email: Some(user.clone().into()),
-                    markdown: Some(format!("{:?}", msg)),
-                    ..Default::default()
-                };
+        if let Some(notificaton) = format_gitlab_notification(&msg) {
+            if let Some(project_users) = state.db.projects.get(&project_id) {
+                for user in project_users {
+                    let msg_out = webex::types::MessageOut {
+                        to_person_email: Some(user.clone().into()),
+                        markdown: Some(notificaton.clone()),
+                        ..Default::default()
+                    };
 
-                let user = user.clone();
-                let client = client.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = client.send_message(&msg_out).await {
-                        log::error!("failed to notify user {:?} due to: {}", user, e);
-                    }
-                });
+                    let user = user.clone();
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = client.send_message(&msg_out).await {
+                            log::error!("failed to notify user {:?} due to: {}", user, e);
+                        }
+                    });
+                }
             }
         }
+    }
+
+    fn format_gitlab_notification(msg: &gitlab::webhooks::WebHook) -> Option<String> {
+        use gitlab::webhooks::WebHook;
+        let merge_request = match msg {
+            WebHook::MergeRequest(merge_request) => merge_request,
+            _ => return None,
+        };
+
+        use gitlab::webhooks::MergeRequestAction;
+        let verb = match merge_request.object_attributes.action? {
+            // we don't hand updates since we don't know what changed
+            MergeRequestAction::Open => return None,
+            MergeRequestAction::Update => "updated",
+            MergeRequestAction::Close => "closed",
+            MergeRequestAction::Reopen => "reopened",
+            MergeRequestAction::Merge => "merged",
+        };
+
+        let title = if let Some(url) = &merge_request.object_attributes.url {
+            format!(
+                "[{title}]({url})",
+                title = merge_request.object_attributes.title,
+                url = url
+            )
+        } else {
+            merge_request.object_attributes.title.clone()
+        };
+
+        Some(format!(
+            "Merge request {title} in [{project}]({project_url}) {verb}",
+            title = title,
+            project = merge_request.project.name,
+            project_url = merge_request.project.web_url,
+            verb = verb
+        ))
     }
 
     #[cfg(test)]
