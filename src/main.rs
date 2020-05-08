@@ -70,10 +70,18 @@ mod handlers {
     use warp::http::StatusCode;
 
     pub async fn gitlab(
-        msg: gitlab::webhooks::WebHook,
+        msg: serde_json::Value,
         state: State,
     ) -> Result<impl warp::Reply, Infallible> {
         log::debug!("incoming gitlab web hook: {:?}", msg);
+
+        let msg: gitlab::webhooks::WebHook = match serde_json::from_value(msg) {
+            Ok(msg) => msg,
+            Err(e) => {
+                log::error!("could not deserialize gitlab webhook: {}", e);
+                return Ok(StatusCode::OK);
+            }
+        };
 
         tokio::spawn(tasks::notify(state, msg));
 
@@ -117,8 +125,8 @@ mod handlers {
 mod models {
     use crate::DynError;
     use chrono::{DateTime, Utc};
-    use gitlab::ProjectId;
     use std::collections::BTreeMap;
+    use std::fmt;
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use url::Url;
@@ -147,6 +155,21 @@ mod models {
     impl From<User> for String {
         fn from(user: User) -> Self {
             (user.0).0
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq)]
+    pub struct ProjectId(pub u64);
+
+    impl From<gitlab::ProjectId> for ProjectId {
+        fn from(id: gitlab::ProjectId) -> Self {
+            Self(id.value())
+        }
+    }
+
+    impl fmt::Display for ProjectId {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "{}", self.0)
         }
     }
 
@@ -187,8 +210,7 @@ mod models {
 }
 
 mod tasks {
-    use crate::models::{Data, Db, State, User};
-    use gitlab::ProjectId;
+    use crate::models::{Data, Db, ProjectId, State, User};
     use lazy_static::lazy_static;
     use url::Url;
 
@@ -246,9 +268,9 @@ mod tasks {
                     .and_then(|(m1, m2)| {
                         m2.as_str().parse().ok().map(|id| {
                             if m1.as_str() == "enable" {
-                                Command::Enable(ProjectId::new(id))
+                                Command::Enable(ProjectId(id))
                             } else {
-                                Command::Disable(ProjectId::new(id))
+                                Command::Disable(ProjectId(id))
                             }
                         })
                     })
@@ -277,7 +299,7 @@ mod tasks {
         let user_projects = db.users.get(user).map(|v| &v[..]).unwrap_or_default();
         let items: Vec<String> = user_projects
             .iter()
-            .map(|id| format!("* {}", id.value()))
+            .map(|id| format!("* {}", id.0))
             .collect();
         let res = items.join("\n");
         if res.is_empty() {
@@ -290,12 +312,12 @@ mod tasks {
     fn enable(db: &mut Db, user: User, project: ProjectId) -> String {
         let user_projects = db.users.entry(user.clone()).or_default();
         if let Some(_) = user_projects.iter().find(|&&id| id == project) {
-            format!("project {} is already enabled", project.value())
+            format!("project {} is already enabled", project.0)
         } else {
             user_projects.push(project);
             db.projects.entry(project).or_default().push(user);
             // TODO: debug check for duplicate entries of user
-            format!("enabled project {}", project.value())
+            format!("enabled project {}", project.0)
         }
     }
 
@@ -320,9 +342,9 @@ mod tasks {
                     project
                 );
             }
-            format!("project {} disabled", project.value())
+            format!("project {} disabled", project)
         } else {
-            format!("project {} is not enabled", project.value())
+            format!("project {} is not enabled", project)
         }
     }
 
@@ -342,7 +364,7 @@ mod tasks {
 
     pub async fn notify(state: State, msg: gitlab::webhooks::WebHook) {
         use gitlab::webhooks::WebHook::*;
-        let project_id = match &msg {
+        let project_id: ProjectId = match &msg {
             Push(hook) => hook.project_id,
             // Issue(hook) => hook.project.project_id,
             // MergeRequest(hook) => hook.project_id,
@@ -350,7 +372,8 @@ mod tasks {
             Build(hook) => hook.project_id,
             // WikiPage(hook) => hook.project_id,
             _ => todo!("handle all hooks"),
-        };
+        }
+        .into();
 
         let state = state.lock().await;
 
@@ -385,11 +408,11 @@ mod tasks {
             assert_eq!(Command::from_text("/status"), Command::Status);
             assert_eq!(
                 Command::from_text("/enable 42"),
-                Command::Enable(ProjectId::new(42))
+                Command::Enable(ProjectId(42))
             );
             assert_eq!(
                 Command::from_text("/disable 42"),
-                Command::Disable(ProjectId::new(42))
+                Command::Disable(ProjectId(42))
             );
             assert_eq!(Command::from_text("/enable abc"), Command::Welcome);
             assert_eq!(Command::from_text("/disable abc"), Command::Welcome);

@@ -601,9 +601,9 @@ dependencies = [
 
 [[package]]
 name = "gitlab"
-version = "0.1210.0"
+version = "0.1209.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e82e01a5b9ff305544c74ce3895b9f3579617135fa3e474216c616c8c653e00"
+checksum = "6b9f18b4dedfd033ddb1fbbec6cd59524d73b5c0b3a6b85b65d1596a9d149926"
 dependencies = [
  "chrono",
  "derive_builder",

@@ -5,7 +5,7 @@ authors = ["boxdot <d@zerovolt.org>"]
 edition = "2018"
 
 [dependencies]
-gitlab = "0.1210.0"
+gitlab = "0.1209.1"
 webex = "0.1.3"
 warp = "0.2.2"
 tokio = { version = "0.2.20", features = ["macros", "sync"] }
